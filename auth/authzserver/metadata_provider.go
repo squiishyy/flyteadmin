@@ -2,16 +2,28 @@ package authzserver
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
+
+	errrs "github.com/pkg/errors"
+	"google.golang.org/api/googleapi"
 
 	"github.com/flyteorg/flyteadmin/auth"
+	"github.com/flyteorg/flyteadmin/pkg/async"
 
 	authConfig "github.com/flyteorg/flyteadmin/auth/config"
 
 	"github.com/flyteorg/flyteidl/gen/pb-go/flyteidl/service"
+)
+
+var (
+	retryAttempts = 5
+	retryDelay    = 1 * time.Second
 )
 
 type OAuth2MetadataProvider struct {
@@ -74,8 +86,18 @@ func (s OAuth2MetadataProvider) GetOAuth2Metadata(ctx context.Context, r *servic
 			httpClient.Transport = transport
 		}
 
-		response, err := httpClient.Get(externalMetadataURL.String())
+		var err error
+		var response *http.Response
+		err = async.RetryOnSpecificErrors(retryAttempts, retryDelay, func() error {
+			response, err = httpClient.Get(externalMetadataURL.String())
+			return err
+		}, isRetryableError)
+
 		if err != nil {
+			var e *googleapi.Error
+			if errors.As(errrs.Cause(err), &e) {
+				return nil, errors.New(fmt.Sprintf("Failed to get OAuth2 Metadata with error code: %v. Err: %v", e.Code, e))
+			}
 			return nil, err
 		}
 
@@ -108,4 +130,12 @@ func NewService(config *authConfig.Config) OAuth2MetadataProvider {
 	return OAuth2MetadataProvider{
 		cfg: config,
 	}
+}
+
+func isRetryableError(err error) bool {
+	var e *googleapi.Error
+	if errors.As(errrs.Cause(err), &e) && e.Code >= 500 && e.Code <= 599 {
+		return true
+	}
+	return false
 }
